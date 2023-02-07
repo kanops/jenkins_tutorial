@@ -1,0 +1,144 @@
+#!/usr/bin/env groovy
+import java.text.SimpleDateFormat
+
+String environment = buildScript(["\"prod:selected\"", "\"dev\""])
+
+String buildScript(List values) {
+    return "return $values"
+}
+
+// Properties step to set the Active choice parameters via 
+// Declarative Scripting
+properties([
+    parameters([
+        [$class: 'ChoiceParameter', 
+        choiceType: 'PT_SINGLE_SELECT',
+        name: 'Environment',
+        script: [$class: 'GroovyScript', fallbackScript: [classpath: [], sandbox: false, script: 'return ["error"]'],
+        script: [classpath: [], sandbox: false,
+        script:  environment]]],
+
+    ])
+])
+
+def INSTANCE = [:]
+
+pipeline {
+    agent any 
+
+    stages {
+        
+        stage('Configuration selon l\'environnement'){
+            steps {
+                script{
+                    switch(params.Environment){
+                        case "prod":
+                            INSTANCE.terraform_folder = "prod";
+                            break;
+                        case "dev":
+                            INSTANCE.terraform_folder = "dev";
+                            break;
+                    }
+
+                    INSTANCE.terraform_file = "${env.WORKSPACE}/${INSTANCE.terraform_folder}/projects/main.tf";             
+                }
+            }
+        }
+
+        stage('Terraform - Création de l\'instance'){
+            steps {
+                script{
+                    // Openstack/Terraform - Login and deploy       
+                    sh """ \
+                        export OS_AUTH_URL=https://auth.cloud.ovh.net/
+                        export OS_PROJECT_ID=$OS_PROJECT_ID
+                        export OS_PROJECT_NAME=$OS_PROJECT_NAME
+                        export OS_USER_DOMAIN_NAME=$OS_USER_DOMAIN_NAME
+                        export OS_USERNAME=$OS_USERNAME
+                        export OS_PASSWORD=$OS_PASSWORD
+                        export OS_INTERFACE=public
+                        export OS_IDENTITY_API_VERSION=3
+                        
+                        echo "Terraform - Configure security groups and update instance"
+                        cd $WORKSPACE/terraform/$INSTANCE.terraform_folder/projects
+                        terraform init
+                        terraform apply --auto-approve
+                    """
+
+                    // Get host IP
+                    INSTANCE.public_ip = sh(returnStdout: true, script: "$WORKSPACE/terraform/$INSTANCE.terraform_folder/projects/host_ip.txt")
+                    echo "$INSTANCE.public_ip"
+                    INSTANCE.private_key_path = "/var/jenkins_home/.ssh/id_rsa"
+                }
+            }
+        }
+
+        stage('Ansible - Configuration de l\'instance'){
+            steps {
+                script{
+                    // Configuration de notre instance
+                    ansiblePlaybook (
+                        colorized: true,
+                        disableHostKeyChecking: true,
+                        inventory: "${INSTANCE.public_ip},",      
+                        playbook: "$WORKSPACE/ansible/playbook_config.yml",
+                        extras: "-u debian --private-key ${INSTANCE.private_key_path}"
+                    )
+                }
+            }
+        }
+
+        stage('Ansible - Exécution des tests et déploiement'){
+            steps {
+                script{
+                    // Build de notre app
+                    sh """
+                    cd app
+                    docker build -t app-local:latest .
+                    docker save -o $WORKSPACE/applocal-latest.tar app-local:latest
+                    scp -i ${INSTANCE.private_key_path} $WORKSPACE/applocal-latest.tar debian@${INSTANCE.public_ip}:/home/debian
+                    """
+
+                    // Test de notre app    
+                    ansiblePlaybook (
+                        colorized: true,
+                        disableHostKeyChecking: true,
+                        inventory: "${INSTANCE.public_ip},",      
+                        playbook: "$WORKSPACE/ansible/playbook_deploy.yml",
+                        extras: "-u debian -e mode=test --private-key ${INSTANCE.private_key_path}"
+                    )
+
+                        // Get and Check test
+                        sh "scp -i ${INSTANCE.private_key_path} debian@${INSTANCE.public_ip}:/tmp/app-results/results.txt $WORKSPACE/results.txt"
+                        result = sh(returnStdout: true, script: "cat $WORKSPACE/results.txt").trim()                    
+                        if(result != "200"){
+                            currentBuild.result = 'ABORTED'
+                            currentBuild.displayName = "Tests K.O"
+                            error('Tests K.O')
+                        }  
+                        else{
+                            echo "Tests O.K"
+
+                            // Déploiement de notre app
+                            ansiblePlaybook (
+                                colorized: true,
+                                disableHostKeyChecking: true,
+                                inventory: "${INSTANCE.public_ip},",      
+                                playbook: "$WORKSPACE/ansible/playbook_deploy.yml",
+                                extras: "-u debian -e mode=deploy --private-key ${INSTANCE.private_key_path}"
+                            )
+                        }
+                }
+            }
+        }
+    }
+
+    post {
+        aborted {
+            script {
+                // Archive le résultat des tests
+                archiveArtifacts artifacts: "/tmp/app-results/results.txt", fingerprint: true
+            }
+        }
+    }
+}

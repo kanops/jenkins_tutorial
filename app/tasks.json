@@ -1,0 +1,14 @@
+{
+    "tasks": [
+        {
+            "type": "docker-run",
+            "label": "docker-run: debug",
+            "dependsOn": [
+                "docker-build"
+            ],
+            "python": {
+                "module": "myapp"
+            }
+        }
+    ]
+}

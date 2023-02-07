@@ -1,0 +1,27 @@
+- name: Load docker image
+  shell: 'docker load -i /home/debian/applocal-latest.tar'
+
+
+- name: Run test app
+  docker_container:
+    name: "app_local_latest"
+    image: "app-local:latest"
+    ports:
+      - 80:80
+      - 443:443
+    recreate: true
+    entrypoint: "./entrypoint-test.sh"
+    volumes:
+      - "/tmp/app-results:/tmp"
+  when: mode == 'test'
+
+- name: Run app
+  docker_container:
+    name: "app_local_latest"
+    image: "app-local:latest"
+    ports:
+      - 80:80
+      - 443:443
+    recreate: true
+    entrypoint: "./entrypoint-deploy.sh"
+  when: mode == 'deploy'

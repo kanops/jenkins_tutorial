@@ -1,0 +1,6 @@
+---
+- name: Configure instance
+  gather_facts: true
+  hosts: all
+  roles:
+    - docker

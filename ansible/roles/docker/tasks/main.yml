@@ -1,0 +1,24 @@
+- name: Install docker packages
+  become: yes
+  apt:
+    name: "{{ item }}"
+    force_apt_get: yes
+    state: present
+    update_cache: yes
+  with_items:
+    - docker.io
+    - python3
+    - python3-pip
+    - vim
+
+- name: Install docker-compose pip package
+  pip:
+    name: docker-compose
+    executable: pip3
+
+- name: Add instance user to docker group
+  become: true
+  user:
+    name: "{{ instance_user }}"
+    groups: docker
+    append: yes
